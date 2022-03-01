@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gocraft/dbr/dialect"
+	"github.com/gocraft/dbr/v2/dialect"
 )
 
 // Open creates a Connection.
@@ -28,6 +28,8 @@ func Open(driver, dsn string, log EventReceiver) (*Connection, error) {
 		d = dialect.PostgreSQL
 	case "sqlite3":
 		d = dialect.SQLite3
+	case "mssql":
+		d = dialect.MSSQL
 	default:
 		return nil, ErrNotSupported
 	}

@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"reflect"
 	"strings"
+
+	"github.com/gocraft/dbr/v2/dialect"
 )
 
 // InsertStmt builds `INSERT INTO ...`.
@@ -18,8 +20,10 @@ type InsertStmt struct {
 	Table        string
 	Column       []string
 	Value        [][]interface{}
+	Ignored      bool
 	ReturnColumn []string
 	RecordID     *int64
+	comments     Comments
 }
 
 type InsertBuilder = InsertStmt
@@ -37,7 +41,17 @@ func (b *InsertStmt) Build(d Dialect, buf Buffer) error {
 		return ErrColumnNotSpecified
 	}
 
-	buf.WriteString("INSERT INTO ")
+	err := b.comments.Build(d, buf)
+	if err != nil {
+		return err
+	}
+
+	if b.Ignored {
+		buf.WriteString("INSERT IGNORE INTO ")
+	} else {
+		buf.WriteString("INSERT INTO ")
+	}
+
 	buf.WriteString(d.QuoteIdent(b.Table))
 
 	var placeholderBuf strings.Builder
@@ -51,7 +65,19 @@ func (b *InsertStmt) Build(d Dialect, buf Buffer) error {
 		buf.WriteString(d.QuoteIdent(col))
 		placeholderBuf.WriteString(placeholder)
 	}
-	buf.WriteString(") VALUES ")
+	buf.WriteString(")")
+
+	if d == dialect.MSSQL && len(b.ReturnColumn) > 0 {
+		buf.WriteString(" OUTPUT ")
+		for i, col := range b.ReturnColumn {
+			if i > 0 {
+				buf.WriteString(",")
+			}
+			buf.WriteString("INSERTED." + d.QuoteIdent(col))
+		}
+	}
+
+	buf.WriteString(" VALUES ")
 	placeholderBuf.WriteString(")")
 	placeholderStr := placeholderBuf.String()
 
@@ -64,7 +90,7 @@ func (b *InsertStmt) Build(d Dialect, buf Buffer) error {
 		buf.WriteValue(tuple...)
 	}
 
-	if len(b.ReturnColumn) > 0 {
+	if d != dialect.MSSQL && len(b.ReturnColumn) > 0 {
 		buf.WriteString(" RETURNING ")
 		for i, col := range b.ReturnColumn {
 			if i > 0 {
@@ -135,6 +161,18 @@ func (b *InsertStmt) Columns(column ...string) *InsertStmt {
 	return b
 }
 
+// Comment adds a comment to prepended. All multi-line sql comment characters are stripped
+func (b *InsertStmt) Comment(comment string) *InsertStmt {
+	b.comments = b.comments.Append(comment)
+	return b
+}
+
+// Ignore any insertion errors
+func (b *InsertStmt) Ignore() *InsertStmt {
+	b.Ignored = true
+	return b
+}
+
 // Values adds a tuple to be inserted.
 // The order of the tuple should match Columns.
 func (b *InsertStmt) Values(value ...interface{}) *InsertStmt {
@@ -175,7 +213,7 @@ func (b *InsertStmt) Record(structValue interface{}) *InsertStmt {
 	return b
 }
 
-// Returning specifies the returning columns for postgres.
+// Returning specifies the returning columns for postgres/mssql.
 func (b *InsertStmt) Returning(column ...string) *InsertStmt {
 	b.ReturnColumn = column
 	return b

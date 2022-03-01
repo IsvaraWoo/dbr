@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"strconv"
+
+	"github.com/gocraft/dbr/v2/dialect"
 )
 
 // SelectStmt builds `SELECT ...`.
@@ -28,6 +30,10 @@ type SelectStmt struct {
 
 	LimitCount  int64
 	OffsetCount int64
+
+	comments Comments
+
+	indexHints []Builder
 }
 
 type SelectBuilder = SelectStmt
@@ -39,6 +45,11 @@ func (b *SelectStmt) Build(d Dialect, buf Buffer) error {
 
 	if len(b.Column) == 0 {
 		return ErrColumnNotSpecified
+	}
+
+	err := b.comments.Build(d, buf)
+	if err != nil {
+		return err
 	}
 
 	buf.WriteString("SELECT ")
@@ -71,6 +82,14 @@ func (b *SelectStmt) Build(d Dialect, buf Buffer) error {
 			buf.WriteString(placeholder)
 			buf.WriteValue(table)
 		}
+
+		for _, hint := range b.indexHints {
+			buf.WriteString(" ")
+			if err := hint.Build(d, buf); err != nil {
+				return err
+			}
+		}
+
 		if len(b.JoinTable) > 0 {
 			for _, join := range b.JoinTable {
 				err := join.Build(d, buf)
@@ -123,14 +142,18 @@ func (b *SelectStmt) Build(d Dialect, buf Buffer) error {
 		}
 	}
 
-	if b.LimitCount >= 0 {
-		buf.WriteString(" LIMIT ")
-		buf.WriteString(strconv.FormatInt(b.LimitCount, 10))
-	}
+	if d == dialect.MSSQL {
+		b.addMSSQLLimits(buf)
+	} else {
+		if b.LimitCount >= 0 {
+			buf.WriteString(" LIMIT ")
+			buf.WriteString(strconv.FormatInt(b.LimitCount, 10))
+		}
 
-	if b.OffsetCount >= 0 {
-		buf.WriteString(" OFFSET ")
-		buf.WriteString(strconv.FormatInt(b.OffsetCount, 10))
+		if b.OffsetCount >= 0 {
+			buf.WriteString(" OFFSET ")
+			buf.WriteString(strconv.FormatInt(b.OffsetCount, 10))
+		}
 	}
 
 	if len(b.Suffixes) > 0 {
@@ -144,6 +167,42 @@ func (b *SelectStmt) Build(d Dialect, buf Buffer) error {
 	}
 
 	return nil
+}
+
+// https://docs.microsoft.com/en-us/previous-versions/sql/sql-server-2012/ms188385(v=sql.110)
+func (b *SelectStmt) addMSSQLLimits(buf Buffer) {
+	limitCount := b.LimitCount
+	offsetCount := b.OffsetCount
+	if limitCount < 0 && offsetCount < 0 {
+		return
+	}
+	if offsetCount < 0 {
+		offsetCount = 0
+	}
+
+	if len(b.Order) == 0 {
+		// ORDER is required for OFFSET / FETCH
+		buf.WriteString(" ORDER BY ")
+		col := b.Column[0]
+		switch col := col.(type) {
+		case string:
+			// FIXME: no quote ident
+			buf.WriteString(col)
+		default:
+			buf.WriteString(placeholder)
+			buf.WriteValue(col)
+		}
+	}
+
+	buf.WriteString(" OFFSET ")
+	buf.WriteString(strconv.FormatInt(offsetCount, 10))
+	buf.WriteString(" ROWS ")
+
+	if limitCount >= 0 {
+		buf.WriteString(" FETCH FIRST ")
+		buf.WriteString(strconv.FormatInt(limitCount, 10))
+		buf.WriteString(" ROWS ONLY ")
+	}
 }
 
 // Select creates a SelectStmt.
@@ -304,6 +363,11 @@ func (b *SelectStmt) OrderDir(col string, isAsc bool) *SelectStmt {
 	return b
 }
 
+func (b *SelectStmt) Comment(comment string) *SelectStmt {
+	b.comments = b.comments.Append(comment)
+	return b
+}
+
 // Join add inner-join.
 // on can be Builder or string.
 func (b *SelectStmt) Join(table, on interface{}) *SelectStmt {
@@ -375,4 +439,46 @@ func (b *SelectStmt) LoadContext(ctx context.Context, value interface{}) (int, e
 // See https://godoc.org/github.com/gocraft/dbr#Load.
 func (b *SelectStmt) Load(value interface{}) (int, error) {
 	return b.LoadContext(context.Background(), value)
+}
+
+// Iterate executes the query and returns the Iterator, or any error encountered.
+func (b *SelectStmt) Iterate() (Iterator, error) {
+	return b.IterateContext(context.Background())
+}
+
+// IterateContext executes the query and returns the Iterator, or any error encountered.
+func (b *SelectStmt) IterateContext(ctx context.Context) (Iterator, error) {
+	_, rows, err := queryRows(ctx, b.runner, b.EventReceiver, b, b.Dialect)
+	if err != nil {
+		if rows != nil {
+			rows.Close()
+		}
+		return nil, err
+	}
+	columns, err := rows.Columns()
+	if err != nil {
+		if rows != nil {
+			rows.Close()
+		}
+		return nil, err
+	}
+	iterator := iteratorInternals{
+		rows:    rows,
+		columns: columns,
+	}
+	return &iterator, err
+}
+
+// IndexHint adds a index hint.
+// hint can be Builder or string.
+func (b *SelectStmt) IndexHint(hints ...interface{}) *SelectStmt {
+	for _, hint := range hints {
+		switch hint := hint.(type) {
+		case string:
+			b.indexHints = append(b.indexHints, Expr(hint))
+		case Builder:
+			b.indexHints = append(b.indexHints, hint)
+		}
+	}
+	return b
 }

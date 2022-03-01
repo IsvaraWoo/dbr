@@ -19,6 +19,8 @@ type UpdateStmt struct {
 	WhereCond    []Builder
 	ReturnColumn []string
 	LimitCount   int64
+	comments     Comments
+	indexHints   []Builder
 }
 
 type UpdateBuilder = UpdateStmt
@@ -36,8 +38,19 @@ func (b *UpdateStmt) Build(d Dialect, buf Buffer) error {
 		return ErrColumnNotSpecified
 	}
 
+	err := b.comments.Build(d, buf)
+	if err != nil {
+		return err
+	}
+
 	buf.WriteString("UPDATE ")
 	buf.WriteString(d.QuoteIdent(b.Table))
+	for _, hint := range b.indexHints {
+		buf.WriteString(" ")
+		if err := hint.Build(d, buf); err != nil {
+			return err
+		}
+	}
 	buf.WriteString(" SET ")
 
 	i := 0
@@ -50,6 +63,7 @@ func (b *UpdateStmt) Build(d Dialect, buf Buffer) error {
 		buf.WriteString(placeholder)
 
 		buf.WriteValue(v)
+
 		i++
 	}
 
@@ -168,8 +182,25 @@ func (b *UpdateStmt) SetMap(m map[string]interface{}) *UpdateStmt {
 	return b
 }
 
+// IncrBy increases column by value
+func (b *UpdateStmt) IncrBy(column string, value interface{}) *UpdateStmt {
+	b.Value[column] = Expr("? + ?", I(column), value)
+	return b
+}
+
+// DecrBy decreases column by value
+func (b *UpdateStmt) DecrBy(column string, value interface{}) *UpdateStmt {
+	b.Value[column] = Expr("? - ?", I(column), value)
+	return b
+}
+
 func (b *UpdateStmt) Limit(n uint64) *UpdateStmt {
 	b.LimitCount = int64(n)
+	return b
+}
+
+func (b *UpdateStmt) Comment(comment string) *UpdateStmt {
+	b.comments = b.comments.Append(comment)
 	return b
 }
 
@@ -188,4 +219,18 @@ func (b *UpdateStmt) LoadContext(ctx context.Context, value interface{}) error {
 
 func (b *UpdateStmt) Load(value interface{}) error {
 	return b.LoadContext(context.Background(), value)
+}
+
+// IndexHint adds a index hint.
+// hint can be Builder or string.
+func (b *UpdateStmt) IndexHint(hints ...interface{}) *UpdateStmt {
+	for _, hint := range hints {
+		switch hint := hint.(type) {
+		case string:
+			b.indexHints = append(b.indexHints, Expr(hint))
+		case Builder:
+			b.indexHints = append(b.indexHints, hint)
+		}
+	}
+	return b
 }
